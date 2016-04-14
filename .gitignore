@@ -1,3 +1,5 @@
 /mozambique
 *.rds
 *.pdf
+.Rproj.user
+*.RData

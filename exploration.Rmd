@@ -58,14 +58,6 @@ df_grid <- expand.grid(lon = lons,
 # Get a shapefile of mozambique
 moz <- raster::getData(name = 'GADM', country = 'MOZ', level = 0)
 
-# Create latitude and longitude columns and convert to spatial
-df_grid$latitude <- df_grid$lat
-df_grid$longitude <- df_grid$lon
-coordinates(df_grid) <- ~longitude + latitude
-proj4string(df_grid) <- proj4string(moz)
-
-
-
 # Get a dataframe of the locations of each house
 # with whether or not they have a mosquito net
 houses <- household %>%
@@ -88,32 +80,45 @@ houses <- household %>%
 # Make houses spatial
 coordinates(houses) <- ~longitude + latitude
 
-# Keep only those points within mozambique
-x <- over(df_grid, polygons(moz))
-df_grid <- df_grid[!is.na(x),]
-
-# Create a value in df_grid
-df_grid$val <- NA
-
-# Loop through the grid, getting a weighte dvalue of mosquito net or not
-nn <- nrow(df_grid)
-for (i in 1:nn){
-    message(paste0('row ', i,
-                   ' of ', nn))
+if('net_grid.RData' %in% dir()){
+  load('net_grid.RData')
+} else {
   
-  # Get distance from specific point in df_grid 
-  # to every point in houses
-  distances <- spDistsN1(pts = houses,
-                        pt = df_grid[i,],
-                        longlat = TRUE)
-  # Define which are acceptably close
-  close_enough <- which(distances <= 50000)
-  # Get an val score (weighted likelihood of having net)
-  val <- stats::weighted.mean(x = houses$net[close_enough],
-                       w = (1 / distances[close_enough]) ^2,
-                       na.rm = TRUE)
-  # Assign val to the dataframe
-  df_grid$val[i] <- val
+  # Create latitude and longitude columns and convert to spatial
+  df_grid$latitude <- df_grid$lat
+  df_grid$longitude <- df_grid$lon
+  coordinates(df_grid) <- ~longitude + latitude
+  proj4string(df_grid) <- proj4string(moz)
+  
+  # Keep only those points within mozambique
+  x <- over(df_grid, polygons(moz))
+  df_grid <- df_grid[!is.na(x),]
+  
+  # Create a value in df_grid
+  df_grid$val <- NA
+  
+  # Loop through the grid, getting a weighte dvalue of mosquito net or not
+  nn <- nrow(df_grid)
+  for (i in 1:nn){
+      message(paste0('row ', i,
+                     ' of ', nn))
+    
+    # Get distance from specific point in df_grid 
+    # to every point in houses
+    distances <- spDistsN1(pts = houses,
+                          pt = df_grid[i,],
+                          longlat = TRUE)
+    # Define which are acceptably close
+    close_enough <- which(distances <= 50000)
+    # Get an val score (weighted likelihood of having net)
+    val <- stats::weighted.mean(x = houses$net[close_enough],
+                         w = (1 / distances[close_enough]) ^2,
+                         na.rm = TRUE)
+    # Assign val to the dataframe
+    df_grid$val[i] <- val
+  }
+  save('df_grid', file = 'net_grid.RData')
+
 }
 
 # Convert to raster
@@ -149,8 +154,9 @@ houses <- household %>%
          n = hv009,
          private = ifelse(hv253b == 'Yes', 1, 
                       ifelse(hv253b == 'No', 0,
-                             NA))) %>%
-  dplyr::select(cluster, n, private) %>%
+                             NA)),
+         weight = hv005) %>%
+  dplyr::select(cluster, n, private, weight) %>%
   left_join(geo@data %>%
               mutate(cluster = DHSCLUST,
                      lat = LATNUM,
@@ -177,6 +183,10 @@ round(prop.table(table(household$hv253b, household$hv270), margin = 2) * 100,2)
 
 # Association between wealth index and spraying more generally
 round(prop.table(table(household$hv253, household$hv270), margin = 2) * 100,2)
+
+# Write csv for FDI in MOZ paper
+library(readr)
+write_csv(houses@data, '/home/joebrew/Documents/fdi_moz/data/dhs_private_irs.csv')
 ```
 
 ```{r}
