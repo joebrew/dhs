@@ -1,0 +1,276 @@
+---
+title: "DHS exploration"
+author: "Joe Brew"
+date: "April 7, 2016"
+output: pdf_document
+---
+
+```{r}
+library(foreign)
+library(readstata13)
+library(rgdal)
+library(maptools)
+library(dplyr)
+library(ggmap)
+library(ggplot2)
+library(maps)
+library(raster) # need to attach in order to mask dplyr::select for xyztoraster
+library(rasterVis)
+library(colorspace)
+
+```
+
+```{r}
+# Read in spatial data
+geo <- readOGR('mozambique/2011/mzge61fl/', 'MZGE61FL')
+
+# Read in births data
+births <- read.dta('mozambique/2011/mzbr62dt/MZBR62FL.DTA')
+
+# Read in couples data
+couples <- read.dta('mozambique/2011/mzcr62dt/MZCR62FL.DTA')
+
+# Read in individual data
+individuals <- read.dta('mozambique/2011/mzir62dt/MZIR62FL.DTA')
+
+# Read in children data
+children <- read.dta('mozambique/2011/mzkr62dt/MZKR62FL.DTA')
+
+# Read in men data
+men <- read.dta('mozambique/2011/mzmr62dt/MZMR62FL.DTA')
+
+# Read in household data
+household <- read.dta('mozambique/2011/mzhr62dt/MZHR62FL.DTA')
+```
+
+```{r}
+# Create dataset of gridded values
+moz <- map('world', 'moz')
+lons <- seq(min(moz$x, na.rm = TRUE), 
+            max(moz$x, na.rm = TRUE), 
+            length = 100)
+lats <- seq(min(moz$y, na.rm = TRUE), 
+            max(moz$y, na.rm = TRUE), 
+            length = 100)
+df_grid <- expand.grid(lon = lons,
+                       lat = lats)
+
+# Get a shapefile of mozambique
+moz <- raster::getData(name = 'GADM', country = 'MOZ', level = 0)
+
+# Create latitude and longitude columns and convert to spatial
+df_grid$latitude <- df_grid$lat
+df_grid$longitude <- df_grid$lon
+coordinates(df_grid) <- ~longitude + latitude
+proj4string(df_grid) <- proj4string(moz)
+
+
+
+# Get a dataframe of the locations of each house
+# with whether or not they have a mosquito net
+houses <- household %>%
+  mutate(cluster = hv004,
+         n = hv009,
+         net = ifelse(hv227 == 'Yes', 1, 
+                      ifelse(hv227 == 'No', 0,
+                             NA))) %>%
+  dplyr::select(cluster, n, net) %>%
+  left_join(geo@data %>%
+              mutate(cluster = DHSCLUST,
+                     lat = LATNUM,
+                     lon = LONGNUM,
+                     urban_rural = URBAN_RURA) %>%
+              dplyr::select(cluster, lat, lon, urban_rural),
+            by = 'cluster') %>%
+  mutate(longitude = lon,
+         latitude = lat)
+
+# Make houses spatial
+coordinates(houses) <- ~longitude + latitude
+
+# Keep only those points within mozambique
+x <- over(df_grid, polygons(moz))
+df_grid <- df_grid[!is.na(x),]
+
+# Create a value in df_grid
+df_grid$val <- NA
+
+# Loop through the grid, getting a weighte dvalue of mosquito net or not
+nn <- nrow(df_grid)
+for (i in 1:nn){
+    message(paste0('row ', i,
+                   ' of ', nn))
+  
+  # Get distance from specific point in df_grid 
+  # to every point in houses
+  distances <- spDistsN1(pts = houses,
+                        pt = df_grid[i,],
+                        longlat = TRUE)
+  # Define which are acceptably close
+  close_enough <- which(distances <= 50000)
+  # Get an val score (weighted likelihood of having net)
+  val <- stats::weighted.mean(x = houses$net[close_enough],
+                       w = (1 / distances[close_enough]) ^2,
+                       na.rm = TRUE)
+  # Assign val to the dataframe
+  df_grid$val[i] <- val
+}
+
+# Convert to raster
+temp <- df_grid@data %>% arrange(lon, lat)
+r <- rasterFromXYZ(temp[, c('lon', 'lat', 'val')])
+```
+
+```{r}
+# Plot
+plot(r)
+image(r)
+contour(r)
+levelplot(r)
+levelplot(r^2, zscalelog = TRUE, contour = TRUE)
+levelplot(r, par.settings=RdBuTheme)
+myTheme=rasterTheme(region=sequential_hcl(10, power=2.2))
+levelplot(r, par.settings=myTheme, contour=TRUE)
+hexbinplot(~val,data=r)
+proj4string(r) <- proj4string(df_grid)
+vectorplot(r, par.settings=RdBuTheme())
+streamplot(r)
+```
+
+```{r}
+# Explore spraying by private company
+table(household$hv253b)
+plot(moz)
+
+# Get a dataframe of the locations of each house
+# with whether or not sprayed by private company
+houses <- household %>%
+  mutate(cluster = hv004,
+         n = hv009,
+         private = ifelse(hv253b == 'Yes', 1, 
+                      ifelse(hv253b == 'No', 0,
+                             NA))) %>%
+  dplyr::select(cluster, n, private) %>%
+  left_join(geo@data %>%
+              mutate(cluster = DHSCLUST,
+                     lat = LATNUM,
+                     lon = LONGNUM,
+                     urban_rural = URBAN_RURA) %>%
+              dplyr::select(cluster, lat, lon, urban_rural),
+            by = 'cluster') %>%
+  mutate(longitude = lon,
+         latitude = lat)
+
+# Make houses spatial
+coordinates(houses) <- ~longitude + latitude
+
+# Keep only those points within mozambique
+points(houses[houses@data$private == 0 |
+                is.na(houses@data$private),],
+       col = 'blue')
+points(houses[houses@data$private == 1 &
+                !is.na(houses@data$private),],
+       col = 'red')
+
+# Association between wealth index and spraying by private company
+round(prop.table(table(household$hv253b, household$hv270), margin = 2) * 100,2)
+
+# Association between wealth index and spraying more generally
+round(prop.table(table(household$hv253, household$hv270), margin = 2) * 100,2)
+```
+
+```{r}
+# # Malaria relevant variables
+# hv227: has moquito bed net for sleeping
+# hv228: children under 5 slept under mosquito bed net
+# hv253: has dwelling been sprayed against mosquitoes
+# hv253a: sprayed by government worker
+# hv253b: sprayed by private company
+# hv253c: sprayed by ngo
+# hv253d-h: sprayed by cs
+# hv253x: sprayed by dont other
+# hv253z: sprayed by dont know
+# hml1: number of mosquito bed nets
+# hml3: net observed by interviewer
+# hml4: months ago net obtained
+# hml5: net treated with insecticide when bought
+# hml6: net treatment status
+# hml7: brand of net
+# hml9: time since last re-treatment (months)
+# hml11: number of persons who slept under this net
+# hml21: someone slept under this net last night
+
+# # Other relevant variables
+# hv270: wealth index
+# hv201: source of drinking water
+# hv204: minutes to get to water source
+# hv219: sex of head of household
+# hv220: age ofhead of household
+
+```
+
+```{r}
+# Number of people that slept under mosquito net last night
+household$n_people_slept_net <- household$hml1
+# Number of people in household
+household$n_people_in_house <- household$hv009
+# Percent of people under mosquito net last night
+household$p_people_slept_net <- 
+  household$n_people_slept_net / household$n_people_in_house * 100
+household$p_people_slept_net <- 
+  ifelse(household$p_people_slept_net > 100,
+         100, 
+         household$p_people_slept_net)
+# Get locations
+household$cluster <- household$hv004
+
+# Merge geographic info
+moz@data$cluster <- moz@data$DHSCLUST
+
+temp <- household %>%
+  dplyr::select(cluster, p_people_slept_net, n_people_in_house) %>%
+  left_join(moz@data %>%
+              dplyr::select(cluster, LONGNUM, LATNUM))
+
+# Group by location and get values
+temp2 <- temp %>%
+  group_by(lat = LATNUM,
+           lon = LONGNUM) %>%
+  summarise(p = weighted.mean(p_people_slept_net, w = n_people_in_house))
+
+# Define colors
+library(RColorBrewer)
+cols <- colorRampPalette(brewer.pal(9, 'Spectral'))(100)
+# cols <- adjustcolor(cols, alpha.f = 0.3)
+
+# Order points by latitude
+temp2 <- arrange(temp2, lat)
+
+# Plot!
+map('world', 'moz')
+legend('bottomright',
+       pch = 16,
+       col = cols[seq(20, 100, 20)],
+       legend = paste0(seq(20, 100, 20), '%'))
+
+# for (i in 1:nrow(temp2)){
+#   points(temp2$lon[i],
+#        temp2$lat[i],
+#        col = cols[ceiling(temp2$p[i])],
+#        cex = 2,
+#        pch = 16)
+#   Sys.sleep(0.3)
+# }
+points(temp2$lon,
+       temp2$lat,
+       col = cols[ceiling(temp2$p)],
+       pch = 16)
+
+
+```
+
+```{r}
+map('world', 'moz')
+points(moz$LONGNUM, moz$LATNUM,
+       col = adjustcolor('red', alpha.f = 0.2))
+```
